@@ -25,19 +25,12 @@
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from app.services.llm_service import interpret_question
 
 from app.services.data_service import load_tickets
-from app.services.query_service import (
-    count_tickets,
-    average_customer_rating,
-    agent_with_most_resolved_tickets,
-    agent_with_lowest_average_rating,
-    average_resolution_time,
-)
+from app.services.query_service import answer_query_with_llm
 from app.services.anomaly_service import (
     get_anomaly_summary,
-    detect_all_anomalies,
+    detect_anomalies,
 )
 
 
@@ -48,37 +41,53 @@ app = FastAPI(
 )
 
 
-# Load dataset once when the API starts
-tickets = load_tickets()
-
-
 class QueryRequest(BaseModel):
     question: str
 
 
 @app.get("/health")
 def health_check():
-    return {
-        "status": "healthy",
-        "tickets_loaded": len(tickets),
-    }
+    try:
+        tickets = load_tickets()
+
+        return {
+            "status": "healthy",
+            "dataset_loaded": True,
+            "tickets_loaded": len(tickets),
+        }
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc),
+        )
 
 
 @app.get("/anomalies")
 def get_anomalies():
-    results = detect_all_anomalies(tickets)
+    try:
+        tickets = load_tickets()
 
-    return {
-        "summary": get_anomaly_summary(tickets),
-        "long_resolution_anomalies": (
-            results["long_resolution_anomalies"]
-            .to_dict(orient="records")
-        ),
-        "old_high_priority_anomalies": (
-            results["old_high_priority_anomalies"]
-            .to_dict(orient="records")
-        ),
-    }
+        summary = get_anomaly_summary(tickets)
+        anomalies = detect_anomalies(tickets)
+
+        return {
+            "summary": summary,
+            "long_resolution_anomalies": (
+                anomalies["long_resolution_time"]
+                .to_dict(orient="records")
+            ),
+            "old_unresolved_priority_anomalies": (
+                anomalies["old_unresolved_priority"]
+                .to_dict(orient="records")
+            ),
+        }
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc),
+        )
 
 
 @app.post("/query")
@@ -88,223 +97,14 @@ def query_tickets(request: QueryRequest):
     if not question:
         raise HTTPException(
             status_code=400,
-            detail="Question cannot be empty."
+            detail="Question cannot be empty.",
         )
 
-    # Try LLM interpretation first
-    llm_result = interpret_question(question)
+    try:
+        return answer_query_with_llm(question)
 
-    # If Ollama is available, use its structured intent
-    if llm_result.get("intent"):
-        intent = llm_result["intent"]
-
-        if intent == "count_tickets":
-            status = llm_result.get("status")
-            priority = llm_result.get("priority")
-
-            if status == "unresolved":
-                result = count_tickets(
-                    tickets,
-                    priority=priority
-                )
-                result = len(
-                    tickets[
-                        (tickets["priority"] == priority)
-                        & (tickets["status"] != "Resolved")
-                    ]
-                )
-
-            else:
-                result = count_tickets(
-                    tickets,
-                    status=status,
-                    priority=priority
-                )
-
-            return {
-                "question": question,
-                "answer": f"There are {result} matching tickets.",
-                "result": result,
-                "source": "LLM + Python"
-            }
-
-        if intent == "average_rating":
-            category = llm_result.get("category")
-
-            result = average_customer_rating(
-                tickets,
-                category=category
-            )
-
-            return {
-                "question": question,
-                "answer": f"The average customer rating is {result:.2f}.",
-                "result": result,
-                "source": "LLM + Python"
-            }
-
-        if intent == "most_resolved_agent":
-            result = agent_with_most_resolved_tickets(tickets)
-
-            return {
-                "question": question,
-                "answer": (
-                    f"Agent {result['agent_id']} resolved "
-                    f"{result['resolved_ticket_count']} tickets."
-                ),
-                "result": result,
-                "source": "LLM + Python"
-            }
-
-        if intent == "lowest_rating_agent":
-            result = agent_with_lowest_average_rating(tickets)
-
-            return {
-                "question": question,
-                "answer": (
-                    f"Agent {result['agent_id']} has the lowest "
-                    f"average rating of {result['average_rating']:.2f}."
-                ),
-                "result": result,
-                "source": "LLM + Python"
-            }
-
-        if intent == "average_resolution_time":
-            result = average_resolution_time(tickets)
-
-            return {
-                "question": question,
-                "answer": (
-                    f"The average resolution time is "
-                    f"{result:.2f} hours."
-                ),
-                "result": result,
-                "source": "LLM + Python"
-            }
-
-        if intent == "anomalies":
-            summary = get_anomaly_summary(tickets)
-
-            return {
-                "question": question,
-                "answer": (
-                    f"I found {summary['total_anomalies']} anomalies: "
-                    f"{summary['total_long_resolution_anomalies']} "
-                    f"long-resolution anomalies and "
-                    f"{summary['total_old_high_priority_anomalies']} "
-                    f"old high-priority tickets."
-                ),
-                "result": summary,
-                "source": "LLM + Python"
-            }
-
-    # Fallback to deterministic processing if LLM is unavailable
-    question_lower = question.lower()
-
-    if "how many" in question_lower and "open" in question_lower:
-        result = count_tickets(tickets, status="Open")
-
-        return {
-            "question": question,
-            "answer": f"There are {result} open tickets.",
-            "result": result,
-            "source": "Python fallback"
-        }
-
-    if "critical" in question_lower and (
-        "unresolved" in question_lower or "open" in question_lower
-    ):
-        result = len(
-            tickets[
-                (tickets["priority"] == "Critical")
-                & (tickets["status"] != "Resolved")
-            ]
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc),
         )
-
-        return {
-            "question": question,
-            "answer": (
-                f"There are {result} unresolved Critical tickets."
-            ),
-            "result": result,
-            "source": "Python fallback"
-        }
-
-    if "average" in question_lower and "rating" in question_lower:
-        category = None
-
-        if "technical" in question_lower:
-            category = "Technical"
-
-        result = average_customer_rating(
-            tickets,
-            category=category
-        )
-
-        return {
-            "question": question,
-            "answer": (
-                f"The average customer rating is {result:.2f}."
-            ),
-            "result": result,
-            "source": "Python fallback"
-        }
-
-    if "most" in question_lower and "resolved" in question_lower:
-        result = agent_with_most_resolved_tickets(tickets)
-
-        return {
-            "question": question,
-            "answer": (
-                f"Agent {result['agent_id']} resolved "
-                f"{result['resolved_ticket_count']} tickets."
-            ),
-            "result": result,
-            "source": "Python fallback"
-        }
-
-    if "lowest" in question_lower and "rating" in question_lower:
-        result = agent_with_lowest_average_rating(tickets)
-
-        return {
-            "question": question,
-            "answer": (
-                f"Agent {result['agent_id']} has the lowest "
-                f"average rating of {result['average_rating']:.2f}."
-            ),
-            "result": result,
-            "source": "Python fallback"
-        }
-
-    if "average" in question_lower and "resolution" in question_lower:
-        result = average_resolution_time(tickets)
-
-        return {
-            "question": question,
-            "answer": (
-                f"The average resolution time is {result:.2f} hours."
-            ),
-            "result": result,
-            "source": "Python fallback"
-        }
-
-    if "anomal" in question_lower:
-        summary = get_anomaly_summary(tickets)
-
-        return {
-            "question": question,
-            "answer": (
-                f"I found {summary['total_anomalies']} anomalies."
-            ),
-            "result": summary,
-            "source": "Python fallback"
-        }
-
-    return {
-        "question": question,
-        "answer": (
-            "I could not determine the requested analysis."
-        ),
-        "result": None,
-        "source": "Python fallback"
-    }

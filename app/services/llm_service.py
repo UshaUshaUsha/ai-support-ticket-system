@@ -1,83 +1,88 @@
-import requests
 import json
-
-OLLAMA_URL = "http://127.0.0.1:11434/api/generate"
-MODEL_NAME = "llama3.2:3b"
+import requests
 
 
-def interpret_question(question: str):
+OLLAMA_URL = "http://localhost:11434/api/generate"
+OLLAMA_MODEL = "llama3.2:3b"
+
+
+def classify_query(query: str) -> dict:
     """
-    Convert a natural-language question into a structured query intent.
-    The actual numerical result is calculated by Python/Pandas.
+    Use the local LLM to understand the user's natural-language query
+    and convert it into a structured intent.
     """
 
     prompt = f"""
-You are an intent parser for a support ticket analytics system.
+You are an intent classifier for an AI support ticket analytics system.
 
-Convert the user's question into JSON.
+The available intents are:
 
-Supported intents:
-- count_tickets
-- average_rating
-- most_resolved_agent
-- lowest_rating_agent
-- average_resolution_time
-- anomalies
-
-Possible filters:
-- status: Open, Resolved, Escalated
-- priority: Low, Medium, High, Critical
-- category: Technical, Billing, Account, etc.
+1. open_ticket_count
+2. resolved_ticket_count
+3. critical_ticket_count
+4. average_technical_rating
+5. agent_most_resolved
+6. anomaly_detection
+7. unsupported
 
 Return ONLY valid JSON.
 
-Examples:
+The JSON format must be:
 
-Question: How many open tickets are there?
-{{"intent":"count_tickets","status":"Open"}}
-
-Question: How many critical tickets are unresolved?
-{{"intent":"count_tickets","priority":"Critical","status":"unresolved"}}
-
-Question: What is the average rating for Technical tickets?
-{{"intent":"average_rating","category":"Technical"}}
-
-Question: Which agent resolved the most tickets?
-{{"intent":"most_resolved_agent"}}
-
-Question: Which agent has the lowest average rating?
-{{"intent":"lowest_rating_agent"}}
-
-Question: What is the average resolution time?
-{{"intent":"average_resolution_time"}}
-
-Question: Any anomalies in resolution times?
-{{"intent":"anomalies"}}
+{{
+    "intent": "one_of_the_intents_above"
+}}
 
 User question:
-{question}
+{query}
 """
+
+    payload = {
+        "model": OLLAMA_MODEL,
+        "prompt": prompt,
+        "stream": False,
+        "format": "json",
+    }
 
     try:
         response = requests.post(
             OLLAMA_URL,
-            json={
-                "model": MODEL_NAME,
-                "prompt": prompt,
-                "stream": False,
-            },
-            timeout=30,
+            json=payload,
+            timeout=60,
         )
 
         response.raise_for_status()
 
-        data = response.json()
-        text = data.get("response", "").strip()
+        result = response.json()
 
-        return json.loads(text)
+        llm_response = result.get("response", "{}")
 
-    except Exception as e:
+        parsed = json.loads(llm_response)
+
+        intent = parsed.get("intent", "unsupported")
+
         return {
-            "error": str(e),
-            "intent": None,
+            "intent": intent,
+            "source": "llm",
         }
+
+    except Exception as exc:
+        return {
+            "intent": "unsupported",
+            "source": "fallback",
+            "error": str(exc),
+        }
+
+
+if __name__ == "__main__":
+    test_questions = [
+        "How many tickets are currently open?",
+        "How many tickets are resolved?",
+        "What is the average customer rating for Technical tickets?",
+        "Which agent resolved the most tickets?",
+        "Are there any anomalies?",
+    ]
+
+    for question in test_questions:
+        print("\nQuestion:", question)
+        print("Result:", classify_query(question))

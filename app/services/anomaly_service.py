@@ -1,184 +1,168 @@
+
 import pandas as pd
 
 from app.services.data_service import load_tickets
 
 
-def detect_long_resolution_anomalies(
-    df: pd.DataFrame,
+def detect_long_resolution_times(
+    df: pd.DataFrame
 ) -> pd.DataFrame:
     """
-    Detect unusually long resolution times using the IQR method.
+    Detect tickets with unusually long resolution times.
+
+    Uses the IQR method:
+    Upper threshold = Q3 + 1.5 * IQR
     """
 
-    resolved_times = df["resolution_time_hrs"].dropna()
-
-    if resolved_times.empty:
-        return pd.DataFrame()
-
-    q1 = resolved_times.quantile(0.25)
-    q3 = resolved_times.quantile(0.75)
-
-    iqr = q3 - q1
-
-    upper_limit = q3 + (1.5 * iqr)
-
-    anomalies = df[
-        df["resolution_time_hrs"] > upper_limit
+    resolved_df = df[
+        df["resolution_time_hrs"].notna()
     ].copy()
 
-    anomalies["anomaly_type"] = "Long resolution time"
-    anomalies["severity"] = "Medium"
-    anomalies["threshold_hrs"] = round(float(upper_limit), 2)
+    if resolved_df.empty:
+        return resolved_df
+
+    q1 = resolved_df["resolution_time_hrs"].quantile(0.25)
+    q3 = resolved_df["resolution_time_hrs"].quantile(0.75)
+
+    iqr = q3 - q1
+    upper_threshold = q3 + (1.5 * iqr)
+
+    anomalies = resolved_df[
+        resolved_df["resolution_time_hrs"] > upper_threshold
+    ].copy()
+
+    anomalies["anomaly_type"] = "Unusually long resolution time"
+    anomalies["anomaly_threshold_hrs"] = upper_threshold
 
     return anomalies
 
 
-def detect_old_high_priority_tickets(
+def detect_old_unresolved_priority_tickets(
     df: pd.DataFrame,
-    age_hours: float = 24,
+    hours: int = 24
 ) -> pd.DataFrame:
     """
-    Detect unresolved High/Critical tickets older than 24 hours.
+    Detect unresolved High/Critical tickets that are older
+    than the specified number of hours.
 
-    Because this dataset is historical, ticket age is calculated
-    relative to the latest timestamp available in the dataset.
+    The assessment specifically gives 24 hours as an example.
     """
 
-    latest_date = df["created_at"].max()
+    current_time = df["created_at"].max()
 
-    result = df[
-        (df["priority"].isin(["High", "Critical"]))
-        & (df["status"] != "Resolved")
+    unresolved = df[
+        df["status"].str.lower().isin(["open", "escalated"])
     ].copy()
 
-    if result.empty:
-        return result
-
-    result["ticket_age_hrs"] = (
-        latest_date - result["created_at"]
+    unresolved["ticket_age_hours"] = (
+        current_time - unresolved["created_at"]
     ).dt.total_seconds() / 3600
 
-    anomalies = result[
-        result["ticket_age_hrs"] > age_hours
+    anomalies = unresolved[
+        unresolved["priority"].str.lower().isin(
+            ["high", "critical"]
+        )
+        & (unresolved["ticket_age_hours"] > hours)
     ].copy()
 
     anomalies["anomaly_type"] = (
-        "Unresolved high-priority ticket older than 24 hours"
-    )
-
-    # Critical tickets are treated as higher severity
-    anomalies["severity"] = anomalies["priority"].map(
-        {
-            "Critical": "Critical",
-            "High": "High",
-        }
+        f"Unresolved High/Critical ticket older than {hours} hours"
     )
 
     return anomalies
 
 
-def detect_all_anomalies(
-    df: pd.DataFrame,
+def detect_anomalies(
+    df: pd.DataFrame
 ) -> dict:
     """
-    Run all anomaly detection rules.
+    Run all anomaly detection checks.
     """
 
-    long_resolution = detect_long_resolution_anomalies(df)
+    long_resolution = detect_long_resolution_times(df)
 
-    old_high_priority = detect_old_high_priority_tickets(df)
+    old_unresolved = detect_old_unresolved_priority_tickets(df)
 
     return {
-        "long_resolution_anomalies": long_resolution,
-        "old_high_priority_anomalies": old_high_priority,
+        "long_resolution_time": long_resolution,
+        "old_unresolved_priority": old_unresolved,
     }
 
 
 def get_anomaly_summary(
-    df: pd.DataFrame,
+    df: pd.DataFrame
 ) -> dict:
     """
-    Return a simple summary of detected anomalies.
+    Return a JSON-friendly summary of detected anomalies.
     """
 
-    results = detect_all_anomalies(df)
+    anomalies = detect_anomalies(df)
 
-    long_resolution = results[
-        "long_resolution_anomalies"
-    ]
-
-    old_high_priority = results[
-        "old_high_priority_anomalies"
-    ]
+    long_resolution = anomalies["long_resolution_time"]
+    old_unresolved = anomalies["old_unresolved_priority"]
 
     return {
-        "total_long_resolution_anomalies": len(
-            long_resolution
-        ),
-        "total_old_high_priority_anomalies": len(
-            old_high_priority
-        ),
-        "total_anomalies": (
+        "long_resolution_count": len(long_resolution),
+        "old_unresolved_priority_count": len(old_unresolved),
+        "total_anomaly_count": (
             len(long_resolution)
-            + len(old_high_priority)
+            + len(old_unresolved)
         ),
     }
 
 
 if __name__ == "__main__":
-
     tickets = load_tickets()
-
-    print("\n--- Anomaly Detection Test ---")
 
     summary = get_anomaly_summary(tickets)
 
-    print("\nAnomaly Summary:")
+    print("Anomaly Detection Results")
+    print("-" * 30)
 
-    for key, value in summary.items():
-        print(f"{key}: {value}")
+    print(
+        "Unusually long resolution tickets:",
+        summary["long_resolution_count"]
+    )
 
-    results = detect_all_anomalies(tickets)
+    print(
+        "Unresolved High/Critical tickets older than 24 hours:",
+        summary["old_unresolved_priority_count"]
+    )
 
-    long_resolution = results[
-        "long_resolution_anomalies"
-    ]
+    print(
+        "Total anomalies:",
+        summary["total_anomaly_count"]
+    )
 
-    old_high_priority = results[
-        "old_high_priority_anomalies"
-    ]
+    anomalies = detect_anomalies(tickets)
 
-    if not long_resolution.empty:
-
-        print("\nLong Resolution Anomalies:")
-
+    if not anomalies["long_resolution_time"].empty:
+        print("\nLong Resolution Examples:")
         print(
-            long_resolution[
+            anomalies["long_resolution_time"][
                 [
                     "ticket_id",
                     "priority",
-                    "status",
                     "resolution_time_hrs",
-                    "threshold_hrs",
-                    "severity",
+                    "anomaly_type",
                 ]
-            ].head(10)
+            ].head(10).to_string(index=False)
         )
 
-    if not old_high_priority.empty:
-
+    if not anomalies["old_unresolved_priority"].empty:
+        print("\nOld Unresolved High/Critical Examples:")
         print(
-            "\nOld High-Priority Unresolved Tickets:"
-        )
-
-        print(
-            old_high_priority[
+            anomalies["old_unresolved_priority"][
                 [
                     "ticket_id",
                     "priority",
                     "status",
-                    "ticket_age_hrs",
-                    "severity",
+                    "ticket_age_hours",
+                    "anomaly_type",
                 ]
-            ].head(10)
+            ].head(10).to_string(index=False)
         )
+
+#Your dataset is from January 2024, while your computer's current date is September 2026. Therefore, using:
+#pd.Timestamp.now()
+
